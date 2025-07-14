@@ -237,17 +237,10 @@ if not uploaded_files:
     st.stop()
 
 # 파일 업로드 및 Assistant 생성
-def create_vector_store_and_assistant():
-    """Vector Store 생성 및 Assistant 생성"""
+def upload_files_and_create_assistant():
+    """파일 업로드 및 Assistant 생성 (호환 버전)"""
     try:
-        # 1. Vector Store 생성
-        with st.spinner("Vector Store를 생성하는 중..."):
-            vector_store = client.beta.vector_stores.create(
-                name=f"문서 저장소 - {datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            st.session_state.vector_store_id = vector_store.id
-        
-        # 2. 파일 업로드 및 Vector Store에 추가
+        # 1. 파일 업로드
         uploaded_file_ids = []
         
         with st.spinner(f"파일들을 업로드하는 중... (0/{len(uploaded_files)})"):
@@ -266,16 +259,9 @@ def create_vector_store_and_assistant():
                 )
                 uploaded_file_ids.append(uploaded_file.id)
         
-        # 3. Vector Store에 파일들 추가
-        with st.spinner("Vector Store에 파일들을 추가하는 중..."):
-            client.beta.vector_stores.file_batches.create(
-                vector_store_id=vector_store.id,
-                file_ids=uploaded_file_ids
-            )
-        
         st.session_state.file_ids = uploaded_file_ids
         
-        # 4. Assistant 생성
+        # 2. Assistant 생성
         file_list = [getattr(file, 'name', f'파일_{i+1}') for i, file in enumerate(uploaded_files)]
         
         instructions = f"""
@@ -293,17 +279,44 @@ def create_vector_store_and_assistant():
         """
         
         with st.spinner("Assistant를 생성하는 중..."):
-            assistant = client.beta.assistants.create(
-                name=assistant_name,
-                instructions=instructions,
-                model=model_choice,
-                tools=[{"type": "file_search"}],
-                tool_resources={
-                    "file_search": {
-                        "vector_store_ids": [vector_store.id]
+            # Vector Store 지원 여부 확인
+            try:
+                # Vector Store 방식 시도 (최신 버전)
+                vector_store = client.beta.vector_stores.create(
+                    name=f"문서 저장소 - {datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                st.session_state.vector_store_id = vector_store.id
+                
+                # Vector Store에 파일 추가
+                client.beta.vector_stores.file_batches.create(
+                    vector_store_id=vector_store.id,
+                    file_ids=uploaded_file_ids
+                )
+                
+                assistant = client.beta.assistants.create(
+                    name=assistant_name,
+                    instructions=instructions,
+                    model=model_choice,
+                    tools=[{"type": "file_search"}],
+                    tool_resources={
+                        "file_search": {
+                            "vector_store_ids": [vector_store.id]
+                        }
                     }
-                }
-            )
+                )
+                st.info("✅ 최신 Vector Store 방식으로 Assistant 생성됨")
+                
+            except AttributeError:
+                # 구 버전 호환 방식 (file_ids 직접 사용)
+                assistant = client.beta.assistants.create(
+                    name=assistant_name,
+                    instructions=instructions,
+                    model=model_choice,
+                    tools=[{"type": "retrieval"}],  # 구 버전에서는 retrieval 사용
+                    file_ids=uploaded_file_ids
+                )
+                st.info("✅ 호환 모드로 Assistant 생성됨 (구 버전)")
+            
             st.session_state.assistant_id = assistant.id
         
         st.success(f"✅ {len(uploaded_files)}개 파일 업로드 및 Assistant 생성 완료!")
@@ -311,6 +324,10 @@ def create_vector_store_and_assistant():
         
     except Exception as e:
         st.error(f"설정 실패: {e}")
+        # 상세한 오류 정보 표시
+        st.error("💡 해결 방법:")
+        st.code("pip install --upgrade openai", language="bash")
+        st.markdown("또는 OpenAI Python 라이브러리 버전이 1.14.0 이상인지 확인하세요.")
         return False
 
 # Thread 생성
@@ -382,7 +399,7 @@ def send_message(message):
 
 # Assistant 및 Thread 초기화
 if not st.session_state.assistant_id:
-    if not create_vector_store_and_assistant():
+    if not upload_files_and_create_assistant():
         st.stop()
 
 if not st.session_state.thread_id:
@@ -472,9 +489,10 @@ with st.expander("📖 사용법"):
     **현대적인 문서 기반 AI 챗봇 사용법:**
     
     ### 🔧 초기 설정
-    1. **API 키 설정**: 사이드바에서 OpenAI API 키 입력 및 검증
-    2. **문서 업로드**: 다양한 방식으로 문서 업로드 지원
-    3. **Assistant 설정**: 모델 선택 및 이름 설정
+    1. **OpenAI 라이브러리 업그레이드**: `pip install --upgrade openai`
+    2. **API 키 설정**: 사이드바에서 OpenAI API 키 입력 및 검증
+    3. **문서 업로드**: 다양한 방식으로 문서 업로드 지원
+    4. **Assistant 설정**: 모델 선택 및 이름 설정
     
     ### 📤 문서 업로드 방식
     - **개별 파일**: 단일 파일 업로드
