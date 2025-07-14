@@ -20,7 +20,7 @@ st.set_page_config(
 api_key = os.getenv("OPENAI_API_KEY")
 
 # 방법 2: 직접 코드에 입력 (보안상 권장하지 않음)
-api_key = "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"  # 이 줄의 주석을 해제하고 실제 API 키를 입력
+api_key = "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"
 
 # 기존 Assistant ID 설정 (선택사항)
 EXISTING_ASSISTANT_ID = "asst_nPcXHjfN0G8nFcpWPxo08byE"  # 기존 Assistant 사용 시
