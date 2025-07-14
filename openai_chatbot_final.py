@@ -143,7 +143,7 @@ with st.sidebar:
             st.session_state.assistant_id and 
             st.session_state.assistant_id != EXISTING_ASSISTANT_ID):
             try:
-                client = OpenAI(api_key=api_key)
+                client = OpenAI(api_key=api_key, organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW")
                 client.beta.assistants.delete(st.session_state.assistant_id)
             except:
                 pass
@@ -180,7 +180,7 @@ if not api_key or api_key == "여기에_실제_API_키를_입력하세요":
 
 # OpenAI 클라이언트 초기화
 try:
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW")
 except Exception as e:
     st.error(f"OpenAI 클라이언트 초기화 실패: {e}")
     st.stop()
