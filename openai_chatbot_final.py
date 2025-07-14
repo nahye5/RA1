@@ -18,10 +18,10 @@ st.set_page_config(
 
 # API 키 설정 (환경변수 또는 직접 입력)
 # 방법 1: 환경변수에서 가져오기
-api_key = os.getenv("OPENAI_API_KEY")
+# api_key = os.getenv("OPENAI_API_KEY")
 
 # 방법 2: 직접 코드에 입력 (보안상 권장하지 않음)
-api_key = "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"  # 이 줄의 주석을 해제하고 실제 API 키를 입력
+# api_key = "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"  # 이 줄의 주석을 해제하고 실제 API 키를 입력
 
 # 기존 Assistant ID 설정 (선택사항)
 EXISTING_ASSISTANT_ID = "asst_nPcXHjfN0G8nFcpWPxo08byE"  # 기존 Assistant 사용 시
@@ -32,17 +32,22 @@ SUPPORTED_EXTENSIONS = ['md', 'txt', 'pdf', 'docx', 'json', 'csv', 'py', 'js', '
 # 사이드바 설정
 with st.sidebar:
     st.title("📚 문서 기반 AI 챗봇")
-    
+
+    # API 키 입력란 추가
+    api_key_input = st.text_input(
+        "🔑 OpenAI API 키 입력",
+        type="password",
+        value=st.session_state.get("api_key", "")
+    )
+    if api_key_input:
+        st.session_state["api_key"] = api_key_input
+
     # API 키 상태 표시
-    if api_key and api_key != "여기에_실제_API_키를_입력하세요":
+    if st.session_state.get("api_key"):
         st.success("✅ API 키가 설정되었습니다")
     else:
-        st.error("❌ API 키를 설정해주세요")
-        st.markdown("""
-        **API 키 설정 방법:**
-        1. 환경변수로 설정: `OPENAI_API_KEY=your-key`
-        2. 코드 19번째 줄에서 직접 설정
-        """)
+        st.error("❌ API 키를 입력해주세요")
+        st.stop()
     
     st.markdown("---")
     
@@ -143,7 +148,10 @@ with st.sidebar:
             st.session_state.assistant_id and 
             st.session_state.assistant_id != EXISTING_ASSISTANT_ID):
             try:
-                client = OpenAI(api_key=api_key, organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW")
+                client = OpenAI(
+                    api_key=st.session_state["api_key"],
+                    organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW"
+                )
                 client.beta.assistants.delete(st.session_state.assistant_id)
             except:
                 pass
@@ -159,7 +167,7 @@ st.title("📚 문서 기반 AI 챗봇")
 st.markdown("업로드된 문서들을 기반으로만 답변하는 AI 챗봇입니다.")
 
 # API 키 확인
-if not api_key or api_key == "여기에_실제_API_키를_입력하세요":
+if not st.session_state.get("api_key") or st.session_state.get("api_key") == "여기에_실제_API_키를_입력하세요":
     st.error("❌ OpenAI API 키가 설정되지 않았습니다.")
     st.markdown("""
     **API 키 설정 방법:**
@@ -180,7 +188,10 @@ if not api_key or api_key == "여기에_실제_API_키를_입력하세요":
 
 # OpenAI 클라이언트 초기화
 try:
-    client = OpenAI(api_key=api_key, organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW")
+    client = OpenAI(
+        api_key=st.session_state["api_key"],
+        organization="org-VVFQ5yvtvPNjQKCmOH2qqHiW"
+    )
 except Exception as e:
     st.error(f"OpenAI 클라이언트 초기화 실패: {e}")
     st.stop()
@@ -545,5 +556,5 @@ if st.checkbox("디버그 정보 표시"):
         "file_count": len(st.session_state.file_ids),
         "message_count": len(st.session_state.messages),
         "uploaded_files": [getattr(file, 'name', f'파일_{i+1}') for i, file in enumerate(uploaded_files)] if uploaded_files else None,
-        "api_key_set": bool(api_key and api_key != "여기에_실제_API_키를_입력하세요")
+        "api_key_set": bool(st.session_state.get("api_key") and st.session_state.get("api_key") != "여기에_실제_API_키를_입력하세요")
     })
