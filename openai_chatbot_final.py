@@ -78,6 +78,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
+if "current_file_ids" not in st.session_state:
+    st.session_state.current_file_ids = []
 
 def create_assistant() -> str:
     """OpenAI Assistant 생성"""
@@ -112,54 +114,25 @@ def upload_file_to_openai(file) -> str:
         st.error(f"파일 업로드 실패: {str(e)}")
         return None
 
-def create_vector_store_with_files(file_ids: List[str]) -> str:
-    """Vector Store 생성 및 파일 추가"""
-    try:
-        vector_store = client.beta.vector_stores.create(
-            name="문서 벡터 저장소"
-        )
-        
-        # 파일들을 벡터 저장소에 추가
-        client.beta.vector_stores.file_batches.create(
-            vector_store_id=vector_store.id,
-            file_ids=file_ids
-        )
-        
-        return vector_store.id
-    except Exception as e:
-        st.error(f"Vector Store 생성 실패: {str(e)}")
-        return None
+def create_vector_store_with_files(file_ids: List[str]) -> List[str]:
+    """파일 ID 리스트를 그대로 반환 (Vector Store 없이)"""
+    return file_ids
 
-def update_assistant_with_vector_store(assistant_id: str, vector_store_id: str):
-    """Assistant에 Vector Store 연결"""
+def update_assistant_with_vector_store(assistant_id: str, file_ids: List[str]):
+    """Assistant 업데이트 (Vector Store 없이)"""
     try:
+        # 단순히 파일 검색 도구만 활성화
         client.beta.assistants.update(
             assistant_id=assistant_id,
-            tool_resources={"file_search": {"vector_store_ids": [vector_store_id]}}
+            tools=[{"type": "file_search"}]
         )
     except Exception as e:
-        # 구 버전 API 호환성을 위한 fallback
-        try:
-            client.beta.assistants.update(
-                assistant_id=assistant_id,
-                tools=[{"type": "file_search"}]
-            )
-            st.warning("Vector Store 연결에 실패했지만, 파일 검색 도구는 활성화되었습니다.")
-        except Exception as e2:
-            st.error(f"Assistant 업데이트 실패: {str(e2)}")
+        st.warning(f"Assistant 업데이트 중 오류 발생: {str(e)}")
 
 def attach_files_to_thread(thread_id: str, file_ids: List[str]):
-    """Thread에 파일 첨부"""
-    try:
-        for file_id in file_ids:
-            client.beta.threads.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content="업로드된 문서를 분석해주세요.",
-                attachments=[{"file_id": file_id, "tools": [{"type": "file_search"}]}]
-            )
-    except Exception as e:
-        st.error(f"파일 첨부 실패: {str(e)}")
+    """Thread 생성 시 파일 정보 저장"""
+    # 세션 상태에 파일 ID 저장
+    st.session_state.current_file_ids = file_ids
 
 def create_thread() -> str:
     """대화 스레드 생성"""
@@ -170,15 +143,25 @@ def create_thread() -> str:
         st.error(f"Thread 생성 실패: {str(e)}")
         return None
 
-def send_message(thread_id: str, message: str) -> str:
-    """메시지 전송 및 응답 받기"""
+def send_message_with_files(thread_id: str, message: str, file_ids: List[str] = None) -> str:
+    """파일과 함께 메시지 전송 및 응답 받기"""
     try:
+        # 메시지 생성 파라미터
+        message_params = {
+            "thread_id": thread_id,
+            "role": "user",
+            "content": message
+        }
+        
+        # 파일이 있는 경우 attachments 추가
+        if file_ids:
+            message_params["attachments"] = [
+                {"file_id": file_id, "tools": [{"type": "file_search"}]} 
+                for file_id in file_ids
+            ]
+        
         # 메시지 추가
-        client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=message
-        )
+        client.beta.threads.messages.create(**message_params)
         
         # 실행 시작
         run = client.beta.threads.runs.create(
@@ -239,35 +222,29 @@ if uploaded_files:
                     file_ids.append(file_id)
             
             if file_ids:
-                # Vector Store 생성
-                vector_store_id = create_vector_store_with_files(file_ids)
+                # Assistant 생성
+                assistant_id = create_assistant()
                 
-                if vector_store_id:
-                    # Assistant 생성
-                    assistant_id = create_assistant()
+                if assistant_id:
+                    # Assistant 업데이트
+                    update_assistant_with_vector_store(assistant_id, file_ids)
                     
-                    if assistant_id:
-                        # Assistant에 Vector Store 연결
-                        update_assistant_with_vector_store(assistant_id, vector_store_id)
+                    # Thread 생성
+                    thread_id = create_thread()
+                    
+                    if thread_id:
+                        # 파일 ID 저장
+                        attach_files_to_thread(thread_id, file_ids)
                         
-                        # Thread 생성
-                        thread_id = create_thread()
-                        
-                        if thread_id:
-                            # Thread에 파일 첨부
-                            attach_files_to_thread(thread_id, file_ids)
-                            
-                            st.session_state.assistant_id = assistant_id
-                            st.session_state.thread_id = thread_id
-                            st.session_state.uploaded_files = [f.name for f in uploaded_files]
-                            st.session_state.messages = []
-                            st.success("✅ 문서 처리가 완료되었습니다! 이제 질문을 입력하세요.")
-                        else:
-                            st.error("Thread 생성에 실패했습니다.")
+                        st.session_state.assistant_id = assistant_id
+                        st.session_state.thread_id = thread_id
+                        st.session_state.uploaded_files = [f.name for f in uploaded_files]
+                        st.session_state.messages = []
+                        st.success("✅ 문서 처리가 완료되었습니다! 이제 질문을 입력하세요.")
                     else:
-                        st.error("Assistant 생성에 실패했습니다.")
+                        st.error("Thread 생성에 실패했습니다.")
                 else:
-                    st.error("Vector Store 생성에 실패했습니다.")
+                    st.error("Assistant 생성에 실패했습니다.")
             else:
                 st.error("파일 업로드에 실패했습니다.")
 
@@ -295,7 +272,8 @@ if st.session_state.assistant_id and st.session_state.thread_id:
         st.session_state.messages.append({"role": "user", "content": prompt})
         
         # AI 응답 생성
-        response = send_message(st.session_state.thread_id, prompt)
+        file_ids = getattr(st.session_state, 'current_file_ids', None)
+        response = send_message_with_files(st.session_state.thread_id, prompt, file_ids)
         
         if response:
             # AI 응답 표시
@@ -334,5 +312,6 @@ if st.sidebar.button("🔄 대화 초기화"):
     st.session_state.assistant_id = None
     st.session_state.thread_id = None
     st.session_state.uploaded_files = []
+    st.session_state.current_file_ids = []
     st.success("대화가 초기화되었습니다.")
     st.rerun()
