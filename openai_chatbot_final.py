@@ -1,8 +1,10 @@
 import streamlit as st
 import openai
 import time
-import io
+import json
+import os
 from typing import List, Dict, Any
+from datetime import datetime
 
 # 페이지 설정
 st.set_page_config(
@@ -11,6 +13,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# 문서 저장소 경로
+DOCUMENTS_DB_PATH = "documents_db.json"
+
 # 사이드바에서 API 키 입력
 st.sidebar.header("🔑 API 설정")
 api_key = st.sidebar.text_input(
@@ -18,32 +23,6 @@ api_key = st.sidebar.text_input(
     type="password",
     help="OpenAI API 키를 입력하세요. https://platform.openai.com/api-keys 에서 발급받을 수 있습니다."
 )
-
-# 기존 Assistant 연결 옵션 추가
-st.sidebar.markdown("---")
-st.sidebar.header("🔗 기존 Assistant 연결")
-existing_assistant_id = st.sidebar.text_input(
-    "기존 Assistant ID (선택사항):",
-    value="asst_nPcXHjfN0G8nFcpWPxo08byE",
-    help="기존에 생성된 Assistant의 ID를 입력하면 연결됩니다."
-)
-
-if existing_assistant_id and st.sidebar.button("🔗 기존 Assistant 연결"):
-    try:
-        # 기존 Assistant 정보 확인
-        assistant = client.beta.assistants.retrieve(existing_assistant_id)
-        st.session_state.assistant_id = existing_assistant_id
-        
-        # 새 Thread 생성
-        thread_id = create_thread()
-        if thread_id:
-            st.session_state.thread_id = thread_id
-            st.session_state.messages = []
-            st.success(f"✅ 기존 Assistant '{assistant.name}' 연결 완료!")
-        else:
-            st.error("Thread 생성에 실패했습니다.")
-    except Exception as e:
-        st.error(f"Assistant 연결 실패: {str(e)}")
 
 # 모델 선택
 model_choice = st.sidebar.selectbox(
@@ -76,14 +55,74 @@ if "thread_id" not in st.session_state:
     st.session_state.thread_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "uploaded_files" not in st.session_state:
-    st.session_state.uploaded_files = []
-if "current_file_ids" not in st.session_state:
-    st.session_state.current_file_ids = []
+if "vector_store_id" not in st.session_state:
+    st.session_state.vector_store_id = None
 
-def create_assistant() -> str:
-    """OpenAI Assistant 생성"""
+def load_documents_db() -> Dict[str, Any]:
+    """문서 데이터베이스 로드"""
+    if os.path.exists(DOCUMENTS_DB_PATH):
+        try:
+            with open(DOCUMENTS_DB_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {
+        "documents": [],
+        "vector_store_id": None,
+        "assistant_id": None,
+        "created_at": datetime.now().isoformat()
+    }
+
+def save_documents_db(db: Dict[str, Any]):
+    """문서 데이터베이스 저장"""
     try:
+        with open(DOCUMENTS_DB_PATH, 'w', encoding='utf-8') as f:
+            json.dump(db, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"문서 데이터베이스 저장 실패: {str(e)}")
+
+def create_or_get_vector_store(db: Dict[str, Any]) -> str:
+    """Vector Store 생성 또는 가져오기"""
+    try:
+        if db.get("vector_store_id"):
+            # 기존 Vector Store 확인
+            try:
+                vector_store = client.beta.vector_stores.retrieve(db["vector_store_id"])
+                return vector_store.id
+            except:
+                # 기존 Vector Store가 없으면 새로 생성
+                pass
+        
+        # 새 Vector Store 생성
+        vector_store = client.beta.vector_stores.create(
+            name="문서 저장소",
+            expires_after={
+                "anchor": "last_active_at",
+                "days": 30
+            }
+        )
+        
+        db["vector_store_id"] = vector_store.id
+        save_documents_db(db)
+        
+        return vector_store.id
+    except Exception as e:
+        st.error(f"Vector Store 생성 실패: {str(e)}")
+        return None
+
+def create_or_get_assistant(db: Dict[str, Any], vector_store_id: str) -> str:
+    """Assistant 생성 또는 가져오기"""
+    try:
+        if db.get("assistant_id"):
+            # 기존 Assistant 확인
+            try:
+                assistant = client.beta.assistants.retrieve(db["assistant_id"])
+                return assistant.id
+            except:
+                # 기존 Assistant가 없으면 새로 생성
+                pass
+        
+        # 새 Assistant 생성
         assistant = client.beta.assistants.create(
             name="문서 기반 챗봇",
             instructions="""당신은 업로드된 문서들을 기반으로 답변하는 전문 AI 어시스턴트입니다.
@@ -95,44 +134,55 @@ def create_assistant() -> str:
             4. 한국어로 친절하고 자세하게 답변하세요.
             5. 필요시 문서의 특정 부분을 요약하거나 해석해주세요.""",
             model=model_choice,
-            tools=[{"type": "file_search"}]
+            tools=[{"type": "file_search"}],
+            tool_resources={
+                "file_search": {
+                    "vector_store_ids": [vector_store_id]
+                }
+            }
         )
+        
+        db["assistant_id"] = assistant.id
+        save_documents_db(db)
+        
         return assistant.id
     except Exception as e:
         st.error(f"Assistant 생성 실패: {str(e)}")
         return None
 
-def upload_file_to_openai(file) -> str:
+def upload_file_to_openai(file) -> tuple:
     """파일을 OpenAI에 업로드"""
     try:
         file_obj = client.files.create(
             file=file,
             purpose="assistants"
         )
-        return file_obj.id
+        return file_obj.id, file_obj.filename
     except Exception as e:
         st.error(f"파일 업로드 실패: {str(e)}")
-        return None
+        return None, None
 
-def create_vector_store_with_files(file_ids: List[str]) -> List[str]:
-    """파일 ID 리스트를 그대로 반환 (Vector Store 없이)"""
-    return file_ids
-
-def update_assistant_with_vector_store(assistant_id: str, file_ids: List[str]):
-    """Assistant 업데이트 (Vector Store 없이)"""
+def add_files_to_vector_store(vector_store_id: str, file_ids: List[str]):
+    """Vector Store에 파일 추가"""
     try:
-        # 단순히 파일 검색 도구만 활성화
-        client.beta.assistants.update(
-            assistant_id=assistant_id,
-            tools=[{"type": "file_search"}]
+        client.beta.vector_stores.file_batches.create(
+            vector_store_id=vector_store_id,
+            file_ids=file_ids
         )
     except Exception as e:
-        st.warning(f"Assistant 업데이트 중 오류 발생: {str(e)}")
+        st.error(f"Vector Store 파일 추가 실패: {str(e)}")
 
-def attach_files_to_thread(thread_id: str, file_ids: List[str]):
-    """Thread 생성 시 파일 정보 저장"""
-    # 세션 상태에 파일 ID 저장
-    st.session_state.current_file_ids = file_ids
+def delete_file_from_vector_store(vector_store_id: str, file_id: str):
+    """Vector Store에서 파일 삭제"""
+    try:
+        client.beta.vector_stores.files.delete(
+            vector_store_id=vector_store_id,
+            file_id=file_id
+        )
+        # OpenAI 파일도 삭제
+        client.files.delete(file_id)
+    except Exception as e:
+        st.error(f"파일 삭제 실패: {str(e)}")
 
 def create_thread() -> str:
     """대화 스레드 생성"""
@@ -143,30 +193,20 @@ def create_thread() -> str:
         st.error(f"Thread 생성 실패: {str(e)}")
         return None
 
-def send_message_with_files(thread_id: str, message: str, file_ids: List[str] = None) -> str:
-    """파일과 함께 메시지 전송 및 응답 받기"""
+def send_message(thread_id: str, message: str, assistant_id: str) -> str:
+    """메시지 전송 및 응답 받기"""
     try:
-        # 메시지 생성 파라미터
-        message_params = {
-            "thread_id": thread_id,
-            "role": "user",
-            "content": message
-        }
-        
-        # 파일이 있는 경우 attachments 추가
-        if file_ids:
-            message_params["attachments"] = [
-                {"file_id": file_id, "tools": [{"type": "file_search"}]} 
-                for file_id in file_ids
-            ]
-        
         # 메시지 추가
-        client.beta.threads.messages.create(**message_params)
+        client.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=message
+        )
         
         # 실행 시작
         run = client.beta.threads.runs.create(
             thread_id=thread_id,
-            assistant_id=st.session_state.assistant_id
+            assistant_id=assistant_id
         )
         
         # 실행 완료 대기
@@ -203,66 +243,151 @@ def send_message_with_files(thread_id: str, message: str, file_ids: List[str] = 
         st.error(f"메시지 전송 실패: {str(e)}")
         return None
 
-# 파일 업로드 섹션
-st.header("📄 문서 업로드")
+# 문서 데이터베이스 로드
+db = load_documents_db()
+
+# 기존 문서 관리 섹션
+st.header("📁 문서 관리")
+
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    st.subheader("📋 저장된 문서 목록")
+    
+    if db["documents"]:
+        for i, doc in enumerate(db["documents"]):
+            col_name, col_date, col_delete = st.columns([2, 1, 1])
+            
+            with col_name:
+                st.write(f"📄 {doc['filename']}")
+            
+            with col_date:
+                upload_date = datetime.fromisoformat(doc['uploaded_at']).strftime("%Y-%m-%d %H:%M")
+                st.write(f"📅 {upload_date}")
+            
+            with col_delete:
+                if st.button(f"🗑️ 삭제", key=f"delete_{i}"):
+                    # Vector Store에서 파일 삭제
+                    if db.get("vector_store_id"):
+                        delete_file_from_vector_store(db["vector_store_id"], doc['file_id'])
+                    
+                    # DB에서 문서 제거
+                    db["documents"].pop(i)
+                    save_documents_db(db)
+                    st.success(f"'{doc['filename']}' 문서가 삭제되었습니다.")
+                    st.rerun()
+    else:
+        st.info("저장된 문서가 없습니다.")
+
+with col2:
+    st.subheader("🔧 관리 도구")
+    
+    if st.button("🗑️ 모든 문서 삭제"):
+        if db["documents"]:
+            # 모든 파일 삭제
+            if db.get("vector_store_id"):
+                for doc in db["documents"]:
+                    delete_file_from_vector_store(db["vector_store_id"], doc['file_id'])
+            
+            # DB 초기화
+            db["documents"] = []
+            save_documents_db(db)
+            st.success("모든 문서가 삭제되었습니다.")
+            st.rerun()
+        else:
+            st.info("삭제할 문서가 없습니다.")
+
+# 새 문서 업로드 섹션
+st.header("📤 새 문서 업로드")
+
 uploaded_files = st.file_uploader(
-    "문서를 업로드하세요 (PDF, TXT, DOCX 등):",
+    "새 문서를 업로드하세요 (PDF, TXT, DOCX 등):",
     accept_multiple_files=True,
     type=['pdf', 'txt', 'docx', 'doc', 'csv', 'xlsx', 'md']
 )
 
 if uploaded_files:
-    if st.button("📚 문서 처리 및 챗봇 초기화"):
+    if st.button("📚 문서 추가"):
         with st.spinner("문서를 처리하고 있습니다..."):
-            # 파일 업로드
-            file_ids = []
-            for uploaded_file in uploaded_files:
-                file_id = upload_file_to_openai(uploaded_file)
-                if file_id:
-                    file_ids.append(file_id)
+            # Vector Store 생성 또는 가져오기
+            vector_store_id = create_or_get_vector_store(db)
             
-            if file_ids:
-                # Assistant 생성
-                assistant_id = create_assistant()
+            if vector_store_id:
+                # 파일 업로드
+                file_ids = []
+                new_documents = []
+                
+                for uploaded_file in uploaded_files:
+                    file_id, filename = upload_file_to_openai(uploaded_file)
+                    if file_id:
+                        file_ids.append(file_id)
+                        new_documents.append({
+                            "filename": filename or uploaded_file.name,
+                            "file_id": file_id,
+                            "uploaded_at": datetime.now().isoformat()
+                        })
+                
+                if file_ids:
+                    # Vector Store에 파일 추가
+                    add_files_to_vector_store(vector_store_id, file_ids)
+                    
+                    # DB에 문서 정보 추가
+                    db["documents"].extend(new_documents)
+                    save_documents_db(db)
+                    
+                    st.success(f"✅ {len(file_ids)}개의 문서가 추가되었습니다!")
+                    st.rerun()
+                else:
+                    st.error("파일 업로드에 실패했습니다.")
+            else:
+                st.error("Vector Store 생성에 실패했습니다.")
+
+# 챗봇 초기화 섹션
+st.header("🤖 챗봇 초기화")
+
+if db["documents"]:
+    if st.button("🚀 챗봇 시작"):
+        with st.spinner("챗봇을 초기화하고 있습니다..."):
+            # Vector Store 가져오기
+            vector_store_id = create_or_get_vector_store(db)
+            
+            if vector_store_id:
+                # Assistant 생성 또는 가져오기
+                assistant_id = create_or_get_assistant(db, vector_store_id)
                 
                 if assistant_id:
-                    # Assistant 업데이트
-                    update_assistant_with_vector_store(assistant_id, file_ids)
-                    
                     # Thread 생성
                     thread_id = create_thread()
                     
                     if thread_id:
-                        # 파일 ID 저장
-                        attach_files_to_thread(thread_id, file_ids)
-                        
                         st.session_state.assistant_id = assistant_id
                         st.session_state.thread_id = thread_id
-                        st.session_state.uploaded_files = [f.name for f in uploaded_files]
+                        st.session_state.vector_store_id = vector_store_id
                         st.session_state.messages = []
-                        st.success("✅ 문서 처리가 완료되었습니다! 이제 질문을 입력하세요.")
+                        st.success("✅ 챗봇이 초기화되었습니다! 이제 질문을 입력하세요.")
                     else:
                         st.error("Thread 생성에 실패했습니다.")
                 else:
                     st.error("Assistant 생성에 실패했습니다.")
             else:
-                st.error("파일 업로드에 실패했습니다.")
-
-# 업로드된 파일 목록 표시
-if st.session_state.uploaded_files:
-    st.success(f"📁 업로드된 문서: {', '.join(st.session_state.uploaded_files)}")
+                st.error("Vector Store 가져오기에 실패했습니다.")
+else:
+    st.info("💡 먼저 문서를 업로드해주세요.")
 
 # 챗봇 섹션
 st.header("💬 AI 챗봇")
 
-# 대화 기록 표시
-if st.session_state.messages:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-# 메시지 입력
+# 현재 상태 표시
 if st.session_state.assistant_id and st.session_state.thread_id:
+    st.success(f"🟢 챗봇이 활성화되었습니다. (문서 {len(db['documents'])}개 로드됨)")
+    
+    # 대화 기록 표시
+    if st.session_state.messages:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    
+    # 메시지 입력
     if prompt := st.chat_input("메시지를 입력하세요..."):
         # 사용자 메시지 표시
         with st.chat_message("user"):
@@ -272,8 +397,7 @@ if st.session_state.assistant_id and st.session_state.thread_id:
         st.session_state.messages.append({"role": "user", "content": prompt})
         
         # AI 응답 생성
-        file_ids = getattr(st.session_state, 'current_file_ids', None)
-        response = send_message_with_files(st.session_state.thread_id, prompt, file_ids)
+        response = send_message(st.session_state.thread_id, prompt, st.session_state.assistant_id)
         
         if response:
             # AI 응답 표시
@@ -283,35 +407,54 @@ if st.session_state.assistant_id and st.session_state.thread_id:
             # 응답 기록에 추가
             st.session_state.messages.append({"role": "assistant", "content": response})
 else:
-    st.info("💡 문서를 업로드하고 '문서 처리 및 챗봇 초기화' 버튼을 클릭하여 챗봇을 시작하세요.")
+    st.info("💡 '챗봇 시작' 버튼을 클릭하여 챗봇을 활성화하세요.")
 
 # 사이드바 정보
 st.sidebar.markdown("---")
 st.sidebar.header("ℹ️ 사용 방법")
 st.sidebar.markdown("""
 1. **API Key 입력**: OpenAI API 키를 입력하세요
-2. **모델 선택**: 사용할 모델을 선택하세요 (gpt-4o 권장)
+2. **모델 선택**: 사용할 모델을 선택하세요
 3. **문서 업로드**: 분석할 문서들을 업로드하세요
-4. **초기화**: '문서 처리 및 챗봇 초기화' 버튼을 클릭하세요
+4. **챗봇 시작**: '챗봇 시작' 버튼을 클릭하세요
 5. **대화 시작**: 업로드된 문서에 대해 질문하세요
 """)
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 기능")
+st.sidebar.header("🎯 새로운 기능")
 st.sidebar.markdown("""
-- 📚 **다중 문서 지원**: 여러 문서를 동시에 업로드
-- 🔍 **스마트 검색**: 문서 내용을 빠르게 검색
-- 💬 **대화형 인터페이스**: 자연스러운 대화로 정보 획득
-- 📝 **출처 표시**: 답변의 근거가 되는 문서 표시
-- 🌐 **다양한 파일 형식**: PDF, TXT, DOCX, CSV 등 지원
+- 💾 **영구 문서 저장**: 문서가 영구적으로 저장됩니다
+- 📁 **문서 관리**: 저장된 문서 목록 확인 및 삭제
+- ➕ **점진적 업로드**: 기존 문서에 새 문서 추가
+- 🔄 **재사용 가능**: 한 번 업로드하면 계속 사용 가능
+- 📊 **Vector Store**: 효율적인 문서 검색 및 관리
 """)
 
-# 초기화 버튼
+# 대화 초기화 버튼
 if st.sidebar.button("🔄 대화 초기화"):
+    st.session_state.messages = []
+    st.session_state.thread_id = None
+    st.success("대화가 초기화되었습니다.")
+    st.rerun()
+
+# 전체 초기화 버튼
+if st.sidebar.button("🗑️ 전체 초기화"):
+    if db["documents"]:
+        # 모든 파일 삭제
+        if db.get("vector_store_id"):
+            for doc in db["documents"]:
+                delete_file_from_vector_store(db["vector_store_id"], doc['file_id'])
+    
+    # 세션 상태 초기화
     st.session_state.messages = []
     st.session_state.assistant_id = None
     st.session_state.thread_id = None
-    st.session_state.uploaded_files = []
-    st.session_state.current_file_ids = []
-    st.success("대화가 초기화되었습니다.")
+    st.session_state.vector_store_id = None
+    
+    # DB 파일 삭제
+    if os.path.exists(DOCUMENTS_DB_PATH):
+        os.remove(DOCUMENTS_DB_PATH)
+    
+    st.success("모든 데이터가 초기화되었습니다.")
     st.rerun()
+
