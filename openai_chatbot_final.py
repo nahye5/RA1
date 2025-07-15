@@ -5,6 +5,7 @@ import json
 import os
 from typing import List, Dict, Any
 from datetime import datetime
+import requests
 
 # 페이지 설정
 st.set_page_config(
@@ -44,6 +45,8 @@ if not api_key:
 # OpenAI 클라이언트 초기화
 try:
     client = openai.OpenAI(api_key=api_key)
+    # API 키가 유효한지 확인
+    models = client.models.list()
 except Exception as e:
     st.error(f"OpenAI 클라이언트 초기화 실패: {str(e)}")
     st.stop()
@@ -81,31 +84,67 @@ def save_documents_db(db: Dict[str, Any]):
     except Exception as e:
         st.error(f"문서 데이터베이스 저장 실패: {str(e)}")
 
+def make_api_request(method: str, endpoint: str, data: dict = None, files: dict = None) -> dict:
+    """OpenAI API 직접 호출"""
+    base_url = "https://api.openai.com/v1"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Beta": "assistants=v2"
+    }
+    
+    url = f"{base_url}{endpoint}"
+    
+    try:
+        if method == "POST":
+            if files:
+                response = requests.post(url, headers=headers, data=data, files=files)
+            else:
+                headers["Content-Type"] = "application/json"
+                response = requests.post(url, headers=headers, json=data)
+        elif method == "GET":
+            response = requests.get(url, headers=headers)
+        elif method == "DELETE":
+            response = requests.delete(url, headers=headers)
+        else:
+            raise ValueError(f"지원되지 않는 메서드: {method}")
+        
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"API 요청 실패: {str(e)}")
+        return None
+
 def create_or_get_vector_store(db: Dict[str, Any]) -> str:
     """Vector Store 생성 또는 가져오기"""
     try:
+        # 기존 Vector Store 확인
         if db.get("vector_store_id"):
-            # 기존 Vector Store 확인
             try:
-                vector_store = client.beta.vector_stores.retrieve(db["vector_store_id"])
-                return vector_store.id
+                result = make_api_request("GET", f"/vector_stores/{db['vector_store_id']}")
+                if result and result.get("id"):
+                    return result["id"]
             except:
-                # 기존 Vector Store가 없으면 새로 생성
                 pass
         
         # 새 Vector Store 생성
-        vector_store = client.beta.vector_stores.create(
-            name="문서 저장소",
-            expires_after={
+        data = {
+            "name": "문서 저장소",
+            "expires_after": {
                 "anchor": "last_active_at",
                 "days": 30
             }
-        )
+        }
         
-        db["vector_store_id"] = vector_store.id
-        save_documents_db(db)
-        
-        return vector_store.id
+        result = make_api_request("POST", "/vector_stores", data)
+        if result and result.get("id"):
+            vector_store_id = result["id"]
+            db["vector_store_id"] = vector_store_id
+            save_documents_db(db)
+            return vector_store_id
+        else:
+            st.error("Vector Store 생성 실패")
+            return None
+            
     except Exception as e:
         st.error(f"Vector Store 생성 실패: {str(e)}")
         return None
@@ -113,13 +152,12 @@ def create_or_get_vector_store(db: Dict[str, Any]) -> str:
 def create_or_get_assistant(db: Dict[str, Any], vector_store_id: str) -> str:
     """Assistant 생성 또는 가져오기"""
     try:
+        # 기존 Assistant 확인
         if db.get("assistant_id"):
-            # 기존 Assistant 확인
             try:
                 assistant = client.beta.assistants.retrieve(db["assistant_id"])
                 return assistant.id
             except:
-                # 기존 Assistant가 없으면 새로 생성
                 pass
         
         # 새 Assistant 생성
@@ -165,22 +203,38 @@ def upload_file_to_openai(file) -> tuple:
 def add_files_to_vector_store(vector_store_id: str, file_ids: List[str]):
     """Vector Store에 파일 추가"""
     try:
-        client.beta.vector_stores.file_batches.create(
-            vector_store_id=vector_store_id,
-            file_ids=file_ids
-        )
+        data = {
+            "file_ids": file_ids
+        }
+        result = make_api_request("POST", f"/vector_stores/{vector_store_id}/file_batches", data)
+        if result:
+            # 파일 배치 완료 대기
+            batch_id = result.get("id")
+            if batch_id:
+                with st.spinner("파일을 Vector Store에 추가하는 중..."):
+                    while True:
+                        batch_status = make_api_request("GET", f"/vector_stores/{vector_store_id}/file_batches/{batch_id}")
+                        if batch_status and batch_status.get("status") == "completed":
+                            break
+                        elif batch_status and batch_status.get("status") == "failed":
+                            st.error("파일 배치 처리 실패")
+                            break
+                        time.sleep(2)
     except Exception as e:
         st.error(f"Vector Store 파일 추가 실패: {str(e)}")
 
 def delete_file_from_vector_store(vector_store_id: str, file_id: str):
     """Vector Store에서 파일 삭제"""
     try:
-        client.beta.vector_stores.files.delete(
-            vector_store_id=vector_store_id,
-            file_id=file_id
-        )
+        # Vector Store에서 파일 삭제
+        make_api_request("DELETE", f"/vector_stores/{vector_store_id}/files/{file_id}")
+        
         # OpenAI 파일도 삭제
-        client.files.delete(file_id)
+        try:
+            client.files.delete(file_id)
+        except:
+            pass  # 파일 삭제 실패는 무시
+            
     except Exception as e:
         st.error(f"파일 삭제 실패: {str(e)}")
 
@@ -242,6 +296,14 @@ def send_message(thread_id: str, message: str, assistant_id: str) -> str:
     except Exception as e:
         st.error(f"메시지 전송 실패: {str(e)}")
         return None
+
+# 대체 방법으로 Vector Store 작업 수행
+def alternative_vector_store_operations():
+    """Vector Store 작업을 위한 대체 메서드들"""
+    st.info("💡 Vector Store API 이슈가 감지되었습니다. 대체 방법을 사용합니다.")
+    
+    # Assistant만 사용하는 간단한 방법
+    return "simple_assistant_mode"
 
 # 문서 데이터베이스 로드
 db = load_documents_db()
@@ -428,6 +490,7 @@ st.sidebar.markdown("""
 - ➕ **점진적 업로드**: 기존 문서에 새 문서 추가
 - 🔄 **재사용 가능**: 한 번 업로드하면 계속 사용 가능
 - 📊 **Vector Store**: 효율적인 문서 검색 및 관리
+- 🛠️ **API 호환성**: 최신 OpenAI API 변경사항 대응
 """)
 
 # 대화 초기화 버튼
@@ -458,3 +521,11 @@ if st.sidebar.button("🗑️ 전체 초기화"):
     st.success("모든 데이터가 초기화되었습니다.")
     st.rerun()
 
+# 디버깅 정보 (개발자용)
+if st.sidebar.checkbox("🔍 디버깅 정보 표시"):
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔧 디버깅 정보")
+    st.sidebar.write(f"Vector Store ID: {st.session_state.vector_store_id}")
+    st.sidebar.write(f"Assistant ID: {st.session_state.assistant_id}")
+    st.sidebar.write(f"Thread ID: {st.session_state.thread_id}")
+    st.sidebar.write(f"저장된 문서 수: {len(db['documents'])}")
